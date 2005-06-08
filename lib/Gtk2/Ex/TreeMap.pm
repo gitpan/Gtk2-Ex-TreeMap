@@ -1,6 +1,6 @@
 package Gtk2::Ex::TreeMap;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 use strict;
 use warnings;
@@ -10,14 +10,46 @@ use GD;
 use Gtk2 -init;
 
 sub new {
-	my ($class) = @_;
+	my ($class, $size) = @_;
 	my $self  = {};
+	$self->{tree} = undef;
 	$self->{rectangles} = undef;
 	$self->{eventbox} = undef;
-	$self->{image} = undef;
 	$self->{selected} = undef;
+	$self->{size} = $size;
+	$self->{image} = new GD::Image(@$size);
+	$self->{signals} = {};
 	bless ($self, $class);
 	return $self;
+}
+
+sub signal_connect {
+	my ($self, $event, $callback) = @_;
+	$self->{signals}->{$event} = $callback;
+}
+
+sub draw_map_simple {
+	my ($self, $list) = @_;
+	my $tree = {};
+	$tree->{Node} = [];
+	my $color = 120;
+	my $count = 0;
+	my $color_incr = (255-120)/($#{@$list}+1);
+	foreach my $element (@$list) {
+		push @{$tree->{Node}}, { size => $element, color => "0,0,$color", description => $count++ };
+		$color += $color_incr;
+	}
+	$self->draw_map($tree);
+}
+
+sub draw_map {
+	my ($self, $tree) = @_;
+	_purify_tree($tree);
+	$self->{tree} = $tree;
+	my $rectangle = [0, 0, $self->{size}->[0], $self->{size}->[1]];
+	$self->_build_rectangles($rectangle, $tree);
+	$self->_paint_rectangles($tree);
+	$self->_build_event_box;
 }
 
 sub get_image {
@@ -25,59 +57,116 @@ sub get_image {
 	return $self->{eventbox};
 }
 
-sub get_rectangles {
-	my ($self) = @_;
-	return $self->{rectangles};
+sub _purify_tree {
+	my ($data) = @_;
+	if (!$data->{Node}) {
+		# This is the child node
+		# Fill in the size, color information if missing.
+		$data->{size} = 0 unless $data->{size};
+		$data->{color} = '0,0,0' unless $data->{color};		
+		return $data;
+	} else {
+		my @list;
+		foreach my $child (@{$data->{Node}}) {
+			push @list, _purify_tree($child);
+		}
+		my $temp = _aggregate_size(\@list);
+		$data->{size} = $temp->{size};
+		$data->{color} = $temp->{color};
+		@{$data->{Node}} = reverse sort { $a->{size} <=> $b->{size} } @{$data->{Node}};
+		return _aggregate_size(\@list);
+	}
 }
 
-sub draw {
-	my ($self, $size, $values) = @_;
-	# Get rid of all 0 values
-	my @goodvalues;
-	foreach my $value (@$values) {
-		push @goodvalues, $value if $value > 0;
+sub _aggregate_size {
+	my ($data) = @_;
+	my $size = 0;
+	foreach my $element (@$data) {
+		$size += $element->{size};
 	}
-	my @sortedvalues = reverse sort @goodvalues;
-	if ($size->[0] > $size->[1]) {
-		$self->_draw_squarified([0,0,@$size], \@sortedvalues, 'horizontal');
+	return { size => $size, color => '0,0,0'};
+}
+
+sub _build_rectangles {
+	my ($self, $size, $tree) = @_;
+	return unless exists($tree->{Node});
+	my $values = [];	
+	foreach my $element (@{$tree->{Node}}) {
+		push @$values, $element->{size} if ($element->{size});
+	}
+	my $rectangles = [];
+	my $width = abs($size->[2] - $size->[0]);
+	my $height = abs($size->[3] - $size->[1]);
+	if ($width > $height) {
+		$self->_draw_squarified($size, $values, $rectangles, 'horizontal');
 	} else {
-		$self->_draw_squarified([0,0,@$size], \@sortedvalues, 'vertical');
+		$self->_draw_squarified($size, $values, $rectangles, 'vertical');
 	}
-	my $im = new GD::Image(@$size);
-	my $black = $im->colorAllocate(0,0,0);       
+	if ($#{@$rectangles} > 0) {
+		$tree->{rectangles} = $rectangles;
+		my $count = 0;
+		foreach my $child (@{$tree->{Node}}) {
+			$self->_build_rectangles($rectangles->[$count++], $child);
+		}
+	}
+}
+
+sub _paint_rectangles {
+	my ($self, $tree) = @_;
+	return unless exists($tree->{rectangles});
+	my $image = $self->{image};
+	my $black = $image->colorAllocate(0,0,0); 
 	my $count = 0;
-	my $incr = 20;
-	foreach my $rect(@{$self->{rectangles}}) {
-		$im->rectangle(@$rect, $black);
+	foreach my $rect(@{$tree->{rectangles}}) {
+		$image->rectangle(@$rect, $black);
 		my $middle_x = ($rect->[0] + $rect->[2])/2;
 		my $middle_y = ($rect->[1] + $rect->[3])/2;
-		my $color = $im->colorResolve($count,$count, 120);
-		$im->fill($middle_x, $middle_y, $color);
-		$count += $incr;
-	}	
-	$self->{image} = $im;
+		#my $colorlist = [int(rand()*255),int(rand()*255),int(rand()*255)];
+		my $colorstring = $tree->{Node}->[$count++]->{color};
+		my @colorlist = split /,/, $colorstring;
+		my $color = $image->colorResolve(@colorlist);
+		$image->fill($middle_x, $middle_y, $color);
+	}
+	foreach my $child (@{$tree->{Node}}) {
+		$self->_paint_rectangles($child);
+	}
+}
+
+sub _build_event_box {
+	my ($self) = @_;
 	my $loader = Gtk2::Gdk::PixbufLoader->new;
-	$loader->write ($im->png);
+	$loader->write ($self->{image}->png);
 	$loader->close;
 	my $image = Gtk2::Image->new_from_pixbuf($loader->get_pixbuf);
 	my $eventbox = Gtk2::EventBox->new;
 	$eventbox->add ($image);
-	print Dumper $self->{rectangles};
 	$eventbox->add_events (['pointer-motion-mask', 'pointer-motion-hint-mask']);
+	$eventbox->signal_connect ('size-allocate' => 
+		sub {
+			my ($widget, $event) = @_;
+			my @imageallocatedsize = $eventbox->allocation->values;
+			$self->{imageallocatedsize} = \@imageallocatedsize;			
+			return 0;
+		}
+	);
 	$eventbox->signal_connect ('motion-notify-event' => 
 		sub {
 			my ($widget, $event) = @_;
 			my ($x, $y) = ($event->x, $event->y);
-			unless ($self->{imageallocatedsize}) {
-				my @imageallocatedsize = $image->allocation->values;
-				$self->{imageallocatedsize} = \@imageallocatedsize;
-			}
-			$x -= ($self->{imageallocatedsize}->[2] - $size->[0])/2;
-			$y -= ($self->{imageallocatedsize}->[3] - $size->[1])/2;
-			my $rectangle_id = $self->_check_inside_rectangle($x,$y);
-			if ($rectangle_id >= 0 and (!$self->{selected} or $rectangle_id != $self->{selected})) {
-				$self->{selected} = $rectangle_id;
-				$self->_highlight_rectangle($self->{rectangles}->[$rectangle_id]);
+			$x -= ($self->{imageallocatedsize}->[2] - $self->{size}->[0])/2;
+			$y -= ($self->{imageallocatedsize}->[3] - $self->{size}->[1])/2;
+			my $path = [];
+			$self->_get_path_at_pos($self->{tree}, $path, $x, $y);
+			if ($#{@$path} >= 0) {
+				my @clonepath = @$path;
+				my $chosen_rectangle = $self->_get_rectangle_at_path(\@clonepath, $self->{tree});
+				$self->_highlight_rectangle($chosen_rectangle);
+				@clonepath = @$path;
+				my $chosen_node = $self->_get_node_at_path(\@clonepath, $self->{tree});				
+				if ($self->{signals}->{'mouse-over'}) {
+					my @clonepath = @$path;
+					&{$self->{signals}->{'mouse-over'}}($x, $y, \@clonepath, $chosen_node)
+				}
 			}
 		}
 	);
@@ -102,22 +191,44 @@ sub _highlight_rectangle {
 	$eventbox->show_all;
 }
 
-sub _check_inside_rectangle {
-	my ($self, $x, $y) = @_;
+
+
+sub _get_path_at_pos {
+	my ($self, $tree, $path, $x, $y) = @_;
 	my $count = 0;
-	foreach my $rect(@{$self->{rectangles}}) {
-		if ($x >= $rect->[0] and $x <= $rect->[2] and $y >= $rect->[1] and $y <= $rect->[3]) {
-			return $count;
+	foreach my $rect(@{$tree->{rectangles}}) {
+		if ($x > $rect->[0] and $x < $rect->[2] and $y > $rect->[1] and $y < $rect->[3]) {
+			push @$path, $count;
+			$self->_get_path_at_pos($tree->{Node}->[$count], $path, $x, $y);
 		}
 		$count++;
+	}	
+}
+
+sub _get_node_at_path {
+	my ($self, $path, $tree) = @_;
+	if ($#{@$path} == 0) {
+		return $tree->{Node}->[$path->[0]];
 	}
-	return -1;
+	my $child = $tree->{Node}->[$path->[0]];
+	shift @$path;
+	$self->_get_node_at_path($path, $child);
+}
+
+sub _get_rectangle_at_path {
+	my ($self, $path, $tree) = @_;
+	if ($#{@$path} == 0) {
+		return $tree->{rectangles}->[$path->[0]];
+	}
+	my $child = $tree->{Node}->[$path->[0]];
+	shift @$path;
+	$self->_get_rectangle_at_path($path, $child);
 }
 
 sub _draw_squarified {
-	my ($self, $rect, $values, $direction) = @_;
+	my ($self, $rect, $values, $rectangles, $direction) = @_;
 	if ($#{@$values} == 0) {
-		$self->draw_list([$rect]);
+		push @$rectangles, $rect;
 		return;
 	}
 	my $sum = 0;
@@ -144,18 +255,23 @@ sub _draw_squarified {
 				$y1 = $y2;
 			}
 			my $aspect_ratio = _calc_best_aspect_ratio(\@temp);
-			if ($aspect_ratio > $best_aspect_ratio) {
+			if ($aspect_ratio >= $best_aspect_ratio) {
 				$best_aspect_ratio = $aspect_ratio;
 				$best_rectangles = \@temp;
 			} else {
-				$self->draw_list($best_rectangles);
+				foreach my $rect(@$best_rectangles) {
+					push @$rectangles, $rect;
+				}
 				my ($x1, $y1, $x2, $y2) = ($best_rectangles->[$i-1]->[2], $rect->[1], $rect->[2], $rect->[3]);
 				for (my $j=0; $j<$i; $j++) {
 					shift @$values;					
 				}
-				$self->_draw_squarified([$x1, $y1, $x2, $y2], $values, 'vertical');
+				$self->_draw_squarified([$x1, $y1, $x2, $y2], $values, $rectangles, 'vertical');
 				return;
 			}
+		}
+		foreach my $rect(@$best_rectangles) {
+			push @$rectangles, $rect;
 		}
 	} elsif ($direction eq 'vertical') {
 		for (my $i=0; $i<=$#{@$values}; $i++) {
@@ -172,20 +288,24 @@ sub _draw_squarified {
 				$x1 = $x2;
 			}
 			my $aspect_ratio = _calc_best_aspect_ratio(\@temp);
-			if ($aspect_ratio > $best_aspect_ratio) {
+			if ($aspect_ratio >= $best_aspect_ratio) {
 				$best_aspect_ratio = $aspect_ratio;
 				$best_rectangles = \@temp;
 			} else {
-				$self->draw_list($best_rectangles);
+				foreach my $rect(@$best_rectangles) {
+					push @$rectangles, $rect;
+				}
 				my ($x1, $y1, $x2, $y2) = ($rect->[0], $best_rectangles->[$i-1]->[3], $rect->[2], $rect->[3]);
 				for (my $j=0; $j<$i; $j++) {
 					shift @$values;					
-				}
-				$self->_draw_squarified([$x1, $y1, $x2, $y2], $values, 'horizontal');
+				}				
+				$self->_draw_squarified([$x1, $y1, $x2, $y2], $values, $rectangles, 'horizontal');
 				return;
 			}
 		}
-	
+		foreach my $rect(@$best_rectangles) {
+			push @$rectangles, $rect;
+		}
 	}	
 }
 
@@ -193,6 +313,9 @@ sub _calc_best_aspect_ratio {
 	my ($rectangles) = @_;
 	my @aspect;
 	foreach my $r (@$rectangles) {
+		if ($r->[1] == $r->[3] or $r->[0] == $r->[2]) {
+			return 0;
+		}
 		my $l = abs ( ($r->[0] - $r->[2])/($r->[1] - $r->[3]) );
 		my $h = abs ( ($r->[1] - $r->[3])/($r->[0] - $r->[2]) );
 		push @aspect, $l < $h ? $l : $h;
@@ -209,13 +332,6 @@ sub min {
 	return $min;
 }
 
-sub draw_list {
-	my ($self, $list) = @_;	
-	foreach my $rect(@$list) {
-		push @{$self->{rectangles}}, $rect;
-	}
-}
-
 1;
 
 __END__
@@ -227,13 +343,12 @@ Gtk2::Ex::TreeMap - Implementation of TreeMap.
 =head1 SYNOPSIS
 
 	use Gtk2::Ex::TreeMap;
-	my $treemap = Gtk2::Ex::TreeMap->new;
-	my $imagesize = [600, 400];
 	my $values = [6,6,4,3,2,2,1];
-	$treemap->draw($imagesize, $values);
+	my $treemap = Gtk2::Ex::TreeMap->new([600,400]);
+	$treemap->draw_map_simple($values);
 	my $window = Gtk2::Window->new;
+	$window->signal_connect(destroy => sub { Gtk2->main_quit; });
 	$window->add($treemap->get_image);
-	pring Dumper $treemap->get_rectangles;
 	$window->show_all;
 	Gtk2->main;
 
@@ -243,24 +358,94 @@ Treemap is a space-constrained visualization of hierarchical structures.
 It is very effective in showing attributes of leaf nodes using size and 
 color coding. http://www.cs.umd.edu/hcil/treemap/
 
+The popular treemaps are;
+
+	http://www.marumushi.com/apps/newsmap/newsmap.cfm
+	http://codecubed.com/map.html the del.icio.us most popular treemap
+	http://www.smartmoney.com/marketmap/
+
+This module implements the TreeMap functionality in pure perl. Currently I have
+implemented only the B<Squarified TreeMap> algorithm. Details of this algorithm can 
+be found at http://www.win.tue.nl/~vanwijk/stm.pdf
+This algorithm was chosen because it produces aesthetically pleasing rectangles.
+
+All the drawing is done using C<GD>. But C<Gtk2> adds plenty of life, bells and whistles
+to the otherwise passive TreeMap png image.
+
 =head1 METHODS
 
-=head2 Gtk2::Ex::TreeMap->new
+=head2 Gtk2::Ex::TreeMap->new([$width, $height]);
 
-Just a plain old constructor.
+Just a plain old constructor. Accepts two arguments, C<$width> and C<$height> of the TreeMap.
 
-=head2 Gtk2::Ex::TreeMap->draw($size, $values)
+	my $treemap = Gtk2::Ex::TreeMap->new([600,400]);
 
-Draws the TreeMap internally. Currently uses the B<Squarified TreeMap> algorithm.
-http://www.win.tue.nl/~vanwijk/stm.pdf
+=head2 Gtk2::Ex::TreeMap->draw_map_simple($values);
+
+Use this API to quickly build a treemap from a flat list of values. The colors of the 
+rectangles are chosen internally. If you want to do anything serious, like specify colors, 
+description etc, then use the C<draw_map($tree)> api.
+
+	my $values = [6,6,4,3,2,2,1];
+	$treemap->draw_map_simple($values);
+
+=head2 Gtk2::Ex::TreeMap->draw_map($tree);
+
+This is the api that you will use most of the time. This one accepts a hierarchical tree 
+structure as its input. I have chosen the tree format that is used by the XML::Simple module.
+This approach so that the tree can be easily constructed from an xml document.
+
+Here is an example definition of the XML
+
+	<Node>
+		<Node>
+			<Node size="9" color="0,0,80" description="0 0"/>
+			<Node size="7" color="0,120,80" description="0 1"/>
+			<Node>
+				<Node size="9" color="0,0,100" description="0 2 0"/>
+				<Node size="9" color="0,0,110" description="0 2 1"/>
+				<Node>
+					<Node size="8" color="0,0,100" description="0 2 2 0"/>
+					<Node size="2" color="0,0,110" description="0 2 2 1"/>
+				</Node>
+			</Node>
+		</Node>
+		<Node>
+			<Node size="7" color="0,170,200" description="1 0"/>
+			<Node size="5" color="0,170,210" description="1 1"/>
+			<Node size="9" color="0,170,220" description="1 2"/>
+		</Node>
+	</Node>	
+
+Now read this string using XML::Simple to derive the tree.
+
+	my $tree = XMLin($xmlstr, ForceArray => 1);
+	$treemap->draw_map($tree);
+
+B<Note: It is very important to use the C<ForceArray> option. Else you will end up with
+a variety of errors.>
 
 =head2 Gtk2::Ex::TreeMap->get_image
 
-Returns the TreeMap image as a Gtk2::Image wrapped in a Gtk2::EventBox
+Returns the TreeMap image as a C<Gtk2::Image> wrapped in a C<Gtk2::EventBox>. You can add this
+to your own Gtk2 container
 
-=head2 Gtk2::Ex::TreeMap->get_rectangles
+	my $window = Gtk2::Window->new;
+	$window->add($treemap->get_image);
+	$window->show_all;
+	Gtk2->main;
 
-Returns and array of rectangles used in the treemap.
+=head1 TODO
+
+  * Implement callback for mouse-over and clicked events
+  * Implement popup box as a default option
+  * Implement text in the rectangles
+  * The boxes should probably be drawn with a black border
+  * Build a new example using WWW::Google::News perhaps !
+  * Once the module is done, may be I'll split it into a two; a pure GD module which 
+    will be "used" by a Gtk2 module. That way, non-Gtk2 folks can use it, of course 
+    without the popups and callbacks and all those bells and whistles.
+  * More tests, more documentation.
 
 =head1 AUTHOR
 
@@ -272,7 +457,7 @@ To the wonderful gtk-perl list.
 
 =head1 COPYRIGHT & LICENSE
 
-Copyright 2004 Ofey Aikon, All Rights Reserved.
+Copyright 2005 Ofey Aikon, All Rights Reserved.
 
 This library is free software; you can redistribute it and/or modify it under
 the terms of the GNU Library General Public License as published by the Free
@@ -289,3 +474,5 @@ with this library; if not, write to the Free Software Foundation, Inc., 59
 Temple Place - Suite 330, Boston, MA  02111-1307  USA.
 
 =cut
+
+__END__
